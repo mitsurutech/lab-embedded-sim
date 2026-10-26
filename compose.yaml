@@ -1,0 +1,259 @@
+# An embedded systems lab: a small made-up 8-bit chip, written in plain Python, that you can
+# read, run and change. It is a simulator, not a real board, and real chips differ.
+#
+# Your copy is the only thing you may use, and it is the only thing you can reach: this lab
+# has no way out to the internet, so nothing you try can touch anybody else's machine.
+# Never point a tool at a site you do not own, in a lab or anywhere else.
+#
+# Open JupyterLab from the lab's page. The work folder holds mcu.py, the whole chip in about
+# sixty commented lines (registers, a clock, a timer, a PWM pin and an interrupt),
+# start.ipynb, a notebook that drives it, and steps/, short scripts that each show one idea.
+# The terminal beside the lab reaches the same Python with docker exec, for example
+#   docker exec jupyter python3 steps/registers.py
+#
+# Hand in a short script or notebook of your own that uses mcu.py (for example a blink pattern
+# or a PWM duty cycle you chose), downloaded from JupyterLab with File, Download, and a
+# sentence on what the registers showed.
+#
+# The image runs as its own unprivileged account and needs no capabilities. JupyterLab asks
+# for no token, because the platform's own door in front of it already knows who you are; do
+# not run it like this anywhere else. Nothing is saved: download your work before you stop
+# the lab, because stopping it forgets every file you made.
+
+services:
+  jupyter:
+    image: jupyter/scipy-notebook:2023-10-20
+    user: "1000:100"
+    expose: ["8888"]
+    working_dir: /home/jovyan/work
+    environment:
+      HOME: /home/jovyan
+      PYTHONPATH: /home/jovyan/work
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mkdir -p /home/jovyan/work
+        cd /home/jovyan/work
+        mkdir -p steps
+        cat > mcu.py <<'PY'
+        """A made-up 8-bit microcontroller, simulated in plain Python.
+
+        This is a simulator of a small chip that does not exist, not a real board.
+        Real chips differ: they have more registers, other names and many more rules.
+        It only shows ideas that real chips share.
+        """
+
+        PERIOD = 16    # the timer counts 0 to 15 and then starts again
+        BUTTON = 2     # pin 2 is the one the chip watches for a button press
+        PWM_PIN = 5    # pin 5 is the one the timer can drive
+
+        # Bits of the timer control register, TCCR
+        RUN = 0b001    # the timer counts
+        PWM = 0b010    # pin 5 follows the timer
+        IE = 0b100     # interrupt enable: call the handler when the button goes up
+
+
+        class Chip:
+            def __init__(self):
+                # Every register is one byte, 0 to 255, and all start at 0 after a reset.
+                self.regs = {"DDR": 0, "PORT": 0, "PIN": 0, "TCCR": 0, "TCNT": 0, "OCR": 0, "IFR": 0}
+                self.outside = 0       # the levels the outside world holds on the pins
+                self.ticks = 0         # how many clock ticks have passed
+                self.handler = None    # a function the chip calls when an interrupt fires
+
+            def write(self, name, value):
+                self.regs[name] = value & 0xFF           # a register holds 8 bits only
+
+            def read(self, name):
+                if name == "PIN":                        # PIN is not stored: it is the pins' levels now
+                    # An output pin shows what the chip drives; an input pin shows the outside world.
+                    return (self.regs["PORT"] & self.regs["DDR"]) | (self.outside & ~self.regs["DDR"] & 0xFF)
+                return self.regs[name]
+
+            def drive(self, pin, level):
+                """The outside world sets a pin. A rising edge on the button pin raises the flag."""
+                before = (self.read("PIN") >> BUTTON) & 1
+                self.outside = (self.outside & ~(1 << pin) & 0xFF) | (level << pin)
+                after = (self.read("PIN") >> BUTTON) & 1
+                if pin == BUTTON and before == 0 and after == 1:
+                    self.regs["IFR"] |= 1                # interrupt flag: the button went up
+
+            def tick(self):
+                """One step of the clock."""
+                control = self.regs["TCCR"]
+                if control & PWM:                        # high while the counter is below the compare value
+                    level = 1 if self.regs["TCNT"] < self.regs["OCR"] else 0
+                    self.regs["PORT"] = (self.regs["PORT"] & ~(1 << PWM_PIN) & 0xFF) | (level << PWM_PIN)
+                if control & RUN:
+                    self.regs["TCNT"] = (self.regs["TCNT"] + 1) % PERIOD
+                if self.regs["IFR"] & 1 and control & IE and self.handler:
+                    self.regs["IFR"] &= 0xFE             # the flag is cleared as the handler starts
+                    self.handler(self)
+                self.ticks += 1
+
+            def show(self, *names):
+                """Print registers in binary, hex and decimal."""
+                for name in names or self.regs:
+                    value = self.read(name)
+                    print(f"{name:<5}0b{value:08b}  0x{value:02X}  {value:3d}")
+        PY
+        cat > steps/registers.py <<'PY'
+        from mcu import Chip
+
+        chip = Chip()
+        print("registers after reset:")
+        chip.show()
+        PY
+        cat > steps/bits.py <<'PY'
+        from mcu import Chip
+
+        chip = Chip()
+        chip.write("PORT", 0b00001010)
+        print("start       ", end=" ")
+        chip.show("PORT")
+        chip.write("PORT", chip.read("PORT") | (1 << 0))
+        print("set bit 0   ", end=" ")
+        chip.show("PORT")
+        chip.write("PORT", chip.read("PORT") & ~(1 << 1))
+        print("clear bit 1 ", end=" ")
+        chip.show("PORT")
+        chip.write("PORT", chip.read("PORT") ^ (1 << 3))
+        print("toggle bit 3", end=" ")
+        chip.show("PORT")
+        chip.write("PORT", chip.read("PORT") ^ (1 << 3))
+        print("toggle again", end=" ")
+        chip.show("PORT")
+        print("low four bits:", format(chip.read("PORT") & 0x0F, "04b"))
+        print("bit 0 is", (chip.read("PORT") >> 0) & 1)
+        PY
+        cat > steps/pins.py <<'PY'
+        from mcu import Chip
+
+        chip = Chip()
+        chip.write("DDR", chip.read("DDR") | 0b00000001)
+        print("pin 0 is an output:")
+        chip.show("DDR")
+        chip.write("PORT", 0b00000001)
+        print("drive pin 0 high:")
+        chip.show("PORT", "PIN")
+        print("blink pattern, one character a tick (# is on):")
+        line = ""
+        for n in range(8):
+            line += "#" if chip.read("PIN") & 1 else "."
+            chip.write("PORT", chip.read("PORT") ^ 1)
+            chip.tick()
+        print(line)
+        PY
+        cat > steps/pwm.py <<'PY'
+        from mcu import Chip, PERIOD, PWM, RUN, PWM_PIN
+
+        for compare in (4, 8, 12):
+            chip = Chip()
+            chip.write("DDR", 1 << PWM_PIN)
+            chip.write("OCR", compare)
+            chip.write("TCCR", RUN | PWM)
+            line = ""
+            for n in range(PERIOD):
+                chip.tick()
+                line += "#" if (chip.read("PIN") >> PWM_PIN) & 1 else "."
+            on = line.count("#")
+            off = line.count(".")
+            print("compare", compare, line, "on", on, "off", off, "duty", on * 100 // PERIOD, "%")
+        PY
+        cat > steps/poll.py <<'PY'
+        from mcu import Chip, BUTTON
+
+        # What the button really does: one press that bounces, then a release.
+        signal = [0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0]
+        chip = Chip()
+        last = 0
+        presses = 0
+        print("tick  pin  press seen?")
+        for n in range(12):
+            chip.drive(BUTTON, signal[n])
+            now = (chip.read("PIN") >> BUTTON) & 1
+            seen = now == 1 and last == 0
+            if seen:
+                presses += 1
+            print(f"{n:>4}  {now:>3}  {'yes' if seen else ''}")
+            last = now
+            chip.tick()
+        print("one real press, but the loop counted", presses)
+        PY
+        cat > steps/interrupt.py <<'PY'
+        from mcu import Chip, BUTTON, IE, RUN
+
+        signal = [0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0]
+        calls = []
+
+
+        def handler(chip):
+            calls.append(chip.ticks)
+            print("handler called at tick", chip.ticks)
+
+
+        chip = Chip()
+        chip.handler = handler
+        chip.write("TCCR", IE | RUN)
+        for n in range(12):
+            chip.drive(BUTTON, signal[n])
+            chip.tick()
+        print("handler calls:", len(calls))
+
+        # The handler can wait out the bounce: ignore a call within 3 ticks of the last one kept.
+        kept = []
+        for tick in calls:
+            if not kept or tick - kept[-1] > 3:
+                kept.append(tick)
+        print("calls kept after waiting out the bounce:", len(kept))
+        PY
+        python3 - <<'PY'
+        import json
+
+
+        def md(text):
+            return {"cell_type": "markdown", "metadata": {}, "source": text}
+
+
+        def code(text):
+            return {"cell_type": "code", "metadata": {}, "source": text, "outputs": [], "execution_count": None}
+
+
+        cells = [
+            md("# A small made-up chip\n\nmcu.py is a simulator of a tiny 8-bit chip that does not exist. "
+               "Run each cell with Shift and Enter, then read mcu.py beside it."),
+            code("from mcu import Chip\n\nchip = Chip()\nchip.show()"),
+            code("chip.write(\"DDR\", 0b00000001)\nchip.write(\"PORT\", 0b00000001)\nchip.show(\"DDR\", \"PORT\", \"PIN\")"),
+            code("from mcu import RUN, PWM, PERIOD\n\nchip.write(\"DDR\", 0b00100000)\nchip.write(\"OCR\", 4)\nchip.write(\"TCCR\", RUN | PWM)\nlevels = []\nfor n in range(PERIOD):\n    chip.tick()\n    levels.append((chip.read(\"PIN\") >> 5) & 1)\nprint(levels)"),
+            md("## Your own question\n\nChange the compare value and run the cell again. What is the duty "
+               "cycle now? Then write a cell that toggles a pin every tick."),
+        ]
+        book = {"cells": cells, "nbformat": 4, "nbformat_minor": 5,
+                "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3 (ipykernel)",
+                                            "language": "python"},
+                             "language_info": {"name": "python"}}}
+        with open("start.ipynb", "w") as out:
+            json.dump(book, out, indent=1)
+        PY
+        exec jupyter lab --no-browser --ip=0.0.0.0 --port=8888 \
+          --ServerApp.root_dir=/home/jovyan/work \
+          --IdentityProvider.token= --ServerApp.password= \
+          '--ServerApp.allow_origin=*' --ServerApp.allow_remote_access=True \
+          --LabApp.check_for_updates_class=jupyterlab.NeverCheckForUpdate \
+          --LabApp.news_url=None
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/api', timeout=3)"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    labels:
+      lab.title: JupyterLab
+      lab.open: "8888"
